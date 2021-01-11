@@ -1,0 +1,8 @@
+channels:
+    - conda-forge
+    - bioconda
+dependencies:
+    - ruby ==2.4
+    - gxx_linux-64
+
+

@@ -1,0 +1,16 @@
+__default__:
+    p: scope-shared.q
+    t: 2-0:00
+    mem: 111G
+coverm_gawk:
+    mem: 5G
+concoct_cut_up:
+    mem: 10G
+concoct_coverage_table:
+    mem: 10G
+concoct_merge:
+    mem: 15G
+concoct_extract_fasta:
+    mem: 5G
+make_bin_table:
+    mem: 1G
