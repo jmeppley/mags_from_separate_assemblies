@@ -1,8 +1,10 @@
 channels:
     - conda-forge
     - bioconda
+    - jmeppley
 dependencies:
-    - ruby ==2.4
+    - ruby
     - gxx_linux-64
+    - finishm
 
 
