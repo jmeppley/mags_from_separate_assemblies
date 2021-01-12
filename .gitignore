@@ -1,0 +1,6 @@
+/.snakemake/
+/binning/
+/MAGs/
+/MAGs_finished/
+/reassembly/
+/assembly
