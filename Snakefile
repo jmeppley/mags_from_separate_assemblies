@@ -53,6 +53,11 @@ rule up_to_checkpoints:
         expand("binning/{sample}/das_tool_DASTool_summary.txt",
                sample=samples)
 
+rule through_checkpoints:
+    input:
+        expand("binning/{sample}/merged_bins",
+               sample=samples)
+
 ###########
 # Coverm
 #        So starting from mapping I like to use a program called coverM 
@@ -111,7 +116,7 @@ rule metabat_sensitive:
     shell: """
         rm -rf {output.bins}
         metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
-                     --minContig {wildcards.min_contig} -v -B {threads} --keep \
+                     --minContig {wildcards.min_contig} -v -B 20 --keep \
                      --saveTNF {output.tnf} --saveDistance {output.dist} \
                      --sensitive \
                      -o {output.bins}/{wildcards.sample}.bin \
@@ -134,7 +139,7 @@ rule metabat_other:
     shell: """
         rm -rf {output.bins}
         metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
-                     --minContig {wildcards.min_contig} -v -B {threads} --keep \
+                     --minContig {wildcards.min_contig} -v -B 20 --keep \
                      --saveTNF {input.tnf} --saveDistance {input.dist} \
                      --{wildcards.mode} \
                      -o {output.bins}/{wildcards.sample}.bin \
@@ -384,12 +389,13 @@ rule reassemble_spades:
     params:
         out_dir="reassembly/{sample}/{bin_id}.spades"
     threads: max_threads
+    conda: "conda.spades.yaml"
     shell:
         """
         rm -rf {params.out_dir}
         spades.py -t {threads} --trusted-contigs {input.prev_contigs} \
           --12 {input.reads} -o {params.out_dir} \
-          > {output}.log 2>&1
+          > {params.out_dir}.log 2>&1
         """
 
 rule min_contig_length:
@@ -405,12 +411,19 @@ rule min_contig_length:
                     out_handle.write(contig.format('fasta'))
 
 rule finishm:
+    """
+    Running 11 of these in parallel killed our system,
+    so it may be wise to use the made up finishm resource
+    to limit the number that run.
+    """
     input:
         fasta="reassembly/{sample}/{bin_id}.filtered.fasta",
         fastq=lambda w: assembly_files[w.sample]['fastq'],
     output:
         fasta="reassembly/{sample}/finished/{bin_id}.filtered.fasta.scaffolds.fasta"
     conda: "conda.finishm.yaml"
+    resources:
+        finishm=1   
     params:
         out_dir="reassembly/{sample}/finished"
     shell: """
