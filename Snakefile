@@ -427,10 +427,11 @@ rule finishm:
     params:
         out_dir="reassembly/{sample}/finished"
     shell: """
+        mkdir -p {params.out_dir}
         finishm roundup --genomes {input.fasta} \
                 --interleaved-fastq {input.fastq} \
                 --output-directory {params.out_dir} \
-            > {params.out_dir}.log 2>&1
+            > {output.fasta}.log 2>&1
         """
 
 rule link_for_checkm:
