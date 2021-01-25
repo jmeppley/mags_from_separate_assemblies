@@ -6,5 +6,6 @@ dependencies:
     - ruby
     - gxx_linux-64
     - finishm
+    - clustalo
 
 
