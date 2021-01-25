@@ -336,11 +336,18 @@ checkpoint das_tool_bins:
         rm -rf {output}
         mkdir -p {output}
         cut -f 2 {input} | uniq | while read FASTA; do
+
+          # remove _sub suffix if present
           FASTA=${{FASTA%%_sub}}
+          # standardize output on .fasta suffix (some will have .fa)
+          FASTA_OUT=${{FASTA%%.fa}}
+          FASTA_OUT=${{FASTA_OUT%%.fasta}}
+          FASTA_OUT=$FASTA_OUT.fasta
+
           METHOD=$(basename $(dirname $FASTA))
           METHOD=${{METHOD%%.bins}}
-          OUTF={output}/$METHOD.$(basename $FASTA)
-          OUTL={output}/$METHOD.$(basename $FASTA).list
+          OUTF={output}/$METHOD.$(basename $FASTA_OUT)
+          OUTL={output}/$METHOD.$(basename $FASTA_OUT).list
           grep "$FASTA" {input} | cut -f 1 > $OUTL
           seqtk subseq $FASTA $OUTL > $OUTF 2> $OUTF.log
         done
