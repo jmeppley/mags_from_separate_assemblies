@@ -1,0 +1,499 @@
+"""
+A variant for a pooled assembly
+"""
+# execution params
+max_threads = config.get('max_threads', 9)
+
+###########
+# Set Up Variables
+
+min_contig_length = int(config.get('min_contig_length', 1500))
+use_finishm = config.get('use_finishm', True)
+mag_dir = "MAGs_finished" if use_finishm else "MAGs"
+
+# Set up input files
+#  This should be a dict of sample -> {"fastq": reads_fastq, "contigs": fasta_file}
+fasta_file = config.get('contigs', "assembly/contigs.all.fasta")
+fasta_stats = config.get('contig_stats', 'assembly/contigs.all.stats.txt')
+fastq_template = "assembly/{sample}.clean.fastq"
+bam_template = "assembly/mapping/{sample}.reads.vs.contigs.all.bam"
+samples, = glob_wildcards(fastq_template)
+samples = [s for s in samples if re.search("/", s) is None]
+logger.debug("Found {} samples".format(len(samples)))
+
+# binning tools
+method_params_list = \
+    [f'maxbin.{min_contig_length}.{markers}' for markers in ['40', '107']] + \
+    [f'metabat2.{min_contig_length}', 'concoct.default'] + \
+    [f'metabat.{min_contig_length}.{mode}' \
+     for mode in ['specific', 'veryspecific', 'sensitive', \
+                  'verysensitive', 'superspecific']] 
+logger.debug("METHODS: " + repr(method_params_list))
+
+###########
+# Target
+#  the first rule defines the default output
+localrules: all, through_dastool
+
+#output_files = expand("binning/{sample}/das_tool_DASTool_scaffolds2bin.txt", \
+#                      sample=samples)
+output_files = [f'{mag_dir}/dRep'] 
+logger.debug("OUTPUT FILES: " + repr(output_files))
+
+rule all:
+    input:
+        checkm="binning/checkm/checkm.o2.tsv",
+        anvio=f"binning/collection_table_{min_contig_length}.txt",
+        merge="binning/merged.bins"
+
+rule checkm_only:
+    input:
+        merge="binning/merged.bins",
+        checkm="binning/checkm/checkm.o2.tsv",
+
+
+rule through_dastool:
+    input: "binning/merged.bins"
+
+###########
+# Binning
+#    metabat, metabat2, maxbin, concoct
+
+rule metabat_abundance_table:
+    """ translate assembly stats table to format for binning """
+    input: 
+        stats=fasta_stats,
+        contigs=fasta_file
+    output:
+        abund=f"binning/abund.var.{min_contig_length}.tsv",
+        contigs=f"binning/contigs.gt_{min_contig_length}.fasta",
+    run:
+        import pandas
+        from Bio import SeqIO
+
+        # load coverage info
+        cov_table = pandas.read_csv(input.stats, sep="\t", index_col=0)
+
+        # filter contigs to >= {min_contig_length}
+        contig_list = []
+        with open(output.contigs, 'wt') as contigs_out:
+            for contig in SeqIO.parse(input.contigs, 'fasta'):
+                if len(contig) >= int(min_contig_length):
+                    contig_list.append(contig.id)
+                    contigs_out.write(contig.format('fasta'))
+
+        cov_table = cov_table.reindex(contig_list)
+
+        # collect data as dict of Series (colmns)
+        #  length and overal average
+        abund_columns = {'contigLen': cov_table['Length'],
+                         'totalAvgDepth': cov_table['MeanCov']}
+        #  sample by sample mean and var
+        for sample in samples:
+            abund_columns[sample] = cov_table[f'{sample}_MeanCov']
+            abund_columns[f"{sample}-var"] = cov_table[f'{sample}_StdCov'] * \
+                                             cov_table[f'{sample}_StdCov']
+
+        # make into a data frame
+        abund_table = pandas.DataFrame(abund_columns)
+
+        # write out
+        abund_table.to_csv(output.abund, sep='\t')
+
+rule metabat_sensitive:
+    """ metabat is run a few times. The first time we save the TNF file for reuse """
+    input:
+        contigs="binning/contigs.gt_{min_contig}.fasta",
+        counts="binning/abund.var.{min_contig}.tsv"
+    output:
+        bins=directory("binning/metabat.{min_contig}.sensitive.bins"),
+        tnf="binning/metabat.{min_contig}.tnf",
+        dist="binning/metabat.{min_contig}.dist",
+    threads: max_threads
+    shell: """
+        rm -rf {output.bins}
+        metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
+                     --minContig {wildcards.min_contig} -v -B 25 --keep \
+                     --saveTNF {output.tnf} --saveDistance {output.dist} \
+                     --sensitive \
+                     -o {output.bins}/bin \
+            > {output.bins}.log 2>&1
+        """
+
+rule metabat_other:
+    """ metabat is run a few more times. the mode comes from das_tool inputs """
+    input:
+        contigs="binning/contigs.gt_{min_contig}.fasta",
+        counts="binning/abund.var.{min_contig}.tsv",
+        tnf="binning/metabat.{min_contig}.tnf",
+        dist="binning/metabat.{min_contig}.dist",
+    output:
+        bins=directory("binning/metabat.{min_contig}.{mode}.bins"),
+    wildcard_constraints:
+        mode="(specific|veryspecific|superspecific|verysensitive)"
+    threads: max_threads
+    shell: """
+        rm -rf {output.bins}
+        metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
+                     --minContig {wildcards.min_contig} -v -B 25  --keep \
+                     --saveTNF {input.tnf} --saveDistance {input.dist} \
+                     --{wildcards.mode} \
+                     -o {output.bins}/bin \
+            > {output.bins}.log 2>&1
+        """
+
+rule metabat2:
+    input:
+        contigs="binning/contigs.gt_{min_contig}.fasta",
+        counts="binning/abund.var.{min_contig}.tsv",
+    output:
+        bins=directory("binning/metabat2.{min_contig}.bins"),
+    threads: max_threads
+    shell: """
+        rm -rf {output.bins}
+        metabat2 -t {threads} -i {input.contigs} -a {input.counts} \
+                     --minContig {wildcards.min_contig} \
+                     -o {output.bins}/bin \
+            > {output.bins}.log 2>&1
+        """
+
+rule sample_abundance_table:
+    input: 
+        stats="binning/abund.var.{min_contig}.tsv",
+    output:   
+        samples=expand("binning/abund.{sample}.{{min_contig}}.tsv", sample=samples)
+    wildcard_constraints:
+        min_contig=r'\d+'
+    run:
+        import pandas
+        cov_table = pandas.read_csv(input.stats, sep="\t", index_col=0)
+        for sample in samples:
+            sample_abund_file = \
+                f"binning/abund.{sample}.{wildcards.min_contig}.tsv"
+            cov_table[sample].to_csv(sample_abund_file, '\t')
+
+rule maxbin:
+    input:
+        contigs="binning/contigs.gt_{min_contig}.fasta",
+        counts=expand("binning/abund.{sample}.{{min_contig}}.tsv", \
+                      sample=samples)
+    output:
+        bins=directory("binning/maxbin.{min_contig}.{markers}.bins"),
+    params:
+        marker_set=lambda w: "" if w.markers == '107' \
+                             else f"-markerset {w.markers}",
+        abund_flags=" ".join(f"-abund{i} " \
+                             f"binning/" \
+                             f"abund.{sample}.{min_contig_length}.tsv" \
+                             for i, sample in enumerate(samples))
+    threads: max_threads
+    shell: """
+        rm -rf {output.bins}
+        mkdir -p {output.bins}
+        run_MaxBin.pl -min_contig_length {wildcards.min_contig} \
+                          -thread {threads} -contig {input.contigs} \
+                          -out {output.bins}/bin \
+                          {params.abund_flags} {params.marker_set} \
+            > {output.bins}.log 2>&1
+       """
+
+# concoct binning happens in a few steps
+rule concoct_cut_up:
+    """ Concoct binning: cup up fasta into chunks """
+    input:
+        contigs=f"binning/contigs.gt_{min_contig_length}.fasta"
+    output:
+        fasta="binning/concoct_files/contigs_10K.fa",
+        bed="binning/concoct_files/contigs_10K.bed"
+    shell: "cut_up_fasta.py {input.contigs} -c 10000 -o 0 --merge_last \
+                            -b {output.bed} > {output.fasta} \
+                2> {output.fasta}.log"
+
+rule index_bam:
+    input: "{file_root}.bam"
+    output: "{file_root}.bam.bai"
+    threads: max_threads
+    shell: "samtools index {input} -@ {threads} > {output}.log 2>&1"
+
+rule concoct_coverage_table:
+    input:
+        bed="binning/concoct_files/contigs_10K.bed",
+        bai_files=expand(bam_template + ".bai", sample=samples)
+    output: "binning/concoct_files/coverage_table.tsv"
+    params:
+        bam_files=expand(bam_template, sample=samples)
+    shell:
+        "concoct_coverage_table.py {input.bed} {params.bam_files} \
+          > {output} 2> {output}.log"
+
+rule concoct:
+    input:
+        fasta="binning/concoct_files/contigs_10K.fa",
+        coverage="binning/concoct_files/coverage_table.tsv"
+    output:
+        "binning/concoct_files/concoct_output_clustering_gt1000.csv"
+    params: 
+        out_prefix="binning/concoct_files/concoct_output"
+    threads: max_threads
+    shell:
+        "concoct -t {threads} --composition_file {input.fasta} \
+                 --coverage_file {input.coverage} -b {params.out_prefix} \
+            > {output}.log 2>&1 "
+
+rule concoct_merge:
+    input: rules.concoct.output
+    output: "binning/concoct_files/concoct.clustering_merged.csv"
+    shell:
+        "merge_cutup_clustering.py {input} > {output} 2> {output}.log"
+
+rule concoct_extract_fasta:
+    input:
+        contigs=f"binning/contigs.gt_{min_contig_length}.fasta",
+        clusters=rules.concoct_merge.output
+    output: directory("binning/concoct.default.bins")
+    shell:
+        """rm -rf {output}
+           mkdir -p {output}
+           extract_fasta_bins.py {input.contigs} {input.clusters} \
+                               --output_path {output} \
+             > {output}.log 2>&1
+        """
+
+##########
+# Merge Bins wit DAS_tool
+rule make_bin_table:
+    "turn folder of MAG fasta files into table mapping file name to contig name"
+    input: "binning/{method}.{params}.bins"
+    output: "binning/{method}.{params}.scaffolds2bin.tsv"
+    wildcard_constraints:
+        method="(metabat2?|maxbin|concoct)"
+    threads: 3
+    #shell: """( grep -H "^>" {input}/*.f*a || true ) \
+    shell: """grep -H "^>" {input}/*.f*a  \
+               | sed 's/:>/\t/g' \
+               | gawk '{{print $2"\t"$1}}' \
+               > {output}"""
+
+rule das_tool:
+    input:
+        files=expand("binning/{method_params}.scaffolds2bin.tsv",
+                     method_params=method_params_list),
+        contigs=f"binning/contigs.gt_{min_contig_length}.fasta",
+    output:
+        bins="binning/das_tool_DASTool_scaffolds2bin.txt",
+        summary="binning/das_tool_DASTool_summary.txt"
+    threads: max_threads
+    params:
+        n=len(method_params_list),
+        out_pref="binning/das_tool",
+        files=",".join( \
+            (f"binning/{method_params}.scaffolds2bin.tsv" \
+             for method_params in method_params_list)),
+        labels=",".join(method_params_list),
+    shell:
+        """
+        # clean up from any previous runs
+        rm -rf {params.out_pref}*
+
+        # Remove empty files from the inputs
+        L={params.n}
+        N=0
+        INPUT_FILES=({input.files})
+        LABELS=({method_params_list})
+        INPUT_FILES_FILE={output.bins}.infiles
+        LABEL_FILE={output.bins}.labels
+
+        while [ "$N" -lt "$L" ]; do
+            if [ -s ${{INPUT_FILES[$N]}} ]; then
+                if [ -s ${{INPUT_FILES_FILE}} ]; then
+                    # Insert a comma if there is already data in the file
+                    echo -n , >> $INPUT_FILES_FILE
+                    echo -n , >> $LABEL_FILE
+                fi
+                echo -n ${{INPUT_FILES[$N]}} >> $INPUT_FILES_FILE
+                echo -n ${{LABELS[$N]}} >> $LABEL_FILE
+            fi
+            let N=N+1
+        done
+        # Pull file contests into variables
+        INPUT_FILES=$(cat $INPUT_FILES_FILE)
+        LABELS=$(cat $LABEL_FILE)
+
+        # now run das_tool
+        DAS_Tool -i ${{INPUT_FILES}} -l ${{LABELS}} -c {input.contigs} \
+                  -o {params.out_pref} -t {threads} --search_engine diamond \
+            > {output.summary}.log 2>&1
+        """
+
+"""
+Part 2 of the workflow reassembles the DAS_Tool bins, so we'll need a
+checkpoint rule to extract the bin to fasta files and then the rest will go
+from there
+
+
+DAS_Tool can extract the bins for us, but it doesn't like the files being in a
+subdirectory. 
+"""
+
+checkpoint das_tool_bins:
+    """
+     Convert das_tool output to fasta files. Das_Tool can do this,
+     but it doesn't work if the input fasta files are in subdirs.
+     
+     Also, remove _sub from some fasta file names. I'm not sure why
+     das_tool is adding that.
+     """
+    input: 
+        "binning/das_tool_DASTool_scaffolds2bin.txt",
+    output: directory("binning/merged.bins")
+    shell:
+        """
+        rm -rf {output}
+        mkdir -p {output}
+        cut -f 2 {input} | uniq | while read FASTA; do
+
+          # remove _sub suffix if present
+          FASTA=${{FASTA%%_sub}}
+          # standardize output on .fasta suffix (some will have .fa)
+          FASTA_OUT=${{FASTA%%.fa}}
+          FASTA_OUT=${{FASTA_OUT%%.fasta}}
+          FASTA_OUT=$FASTA_OUT.fasta
+
+          METHOD=$(basename $(dirname $FASTA))
+          METHOD=${{METHOD%%.bins}}
+          OUTF={output}/$METHOD.$(basename $FASTA_OUT)
+          OUTL={output}/$METHOD.$(basename $FASTA_OUT).list
+          grep "$FASTA" {input} | cut -f 1 > $OUTL
+          seqtk subseq $FASTA $OUTL > $OUTF 2> $OUTF.log
+        done
+        """
+
+
+def get_merged_bins():
+    checkpoint_dir = checkpoints.das_tool_bins.get().output
+    bins, = glob_wildcards("binning/merged.bins/{bin_id}.fasta")
+    return bins
+
+###########
+# bin tables for anvio
+#  generate bin collection files for the anvio metagenomic makefile
+
+contig_splits = {}
+import threading
+contig_split_loading_lock = threading.Lock()
+config['.contig_splits_loaded'] = False
+def get_contig_splits(split_names_file):
+    with contig_split_loading_lock:
+        if not config['.contig_splits_loaded']:
+            with open(split_names_file) as lines:
+                for split_name in lines:
+                    m = re.search(r'_(\d+)_split_(\d+)$', split_name.strip())
+                    if m:
+                        contig_num, split_num = [int(v) for v in m.groups()]
+                        if split_num > 1 and (split_num > \
+                                              contig_splits.get(contig_num,\
+                                                                1)):
+                            contig_splits[contig_num] = split_num
+        config['.contig_splits_loaded'] = True
+    return contig_splits
+
+rule collection_table:
+    input:
+        bins=lambda w: [f"binning/collections_{w.min_contig}/{method}.txt" \
+                        for method in method_params_list + ['merged']]
+    output:
+        table="binning/collection_table_{min_contig}.txt"
+    run:
+        name = config['rename_prefix']
+        min_contig = wildcards.min_contig
+        with open(output.table, 'wt') as output_table:
+            output_table.write("\t".join(["name",
+                                          "collection_name",
+                                          "collection_file",
+                                          "bins_info",
+                                          "contigs_mode",
+                                          "default_collection"]) + "\n")
+            for method in method_params_list + ['merged',]:
+                bins_file = f"binning/collections_{min_contig}/{method}.txt"
+                output_table.write("\t".join([name,
+                                              method,
+                                              bins_file,
+                                              "",
+                                              "",
+                                              ""]) + "\n")
+
+
+
+rule bin_collections:
+    """
+    The anvio metagenomic can import multiple binning collections, but it
+    needs two files for each:
+
+    collection_file: 2 columns: contig, bin_id
+    collection_info: 3 columns: bin_id, method, color(#000000)
+
+    These are referenced in a master file:
+    collections_table: 6 columns: name(group) collection_name collection_file
+                                  bins_info contigs_mode default_collection
+
+    I think the info file is optional.
+
+    Also, anvio splits and renames contigs. To generate collections:
+     * export the split names into config[split_names_file]
+     * supply the split naming prefic in config[rename_prefix]
+    """
+    input:
+        dir="binning/{method}.bins",
+        split_names=lambda w: config['split_names_file']
+    output:
+        bins="binning/collections_{min_contig}/{method}.txt",
+    run:
+        rename_prefix = config.get('rename_prefix', None)
+        contig_splits = get_contig_splits(input.split_names)
+        # find all .fasta and .fa files
+        from glob import glob
+        from Bio import SeqIO
+        fasta_files = chain(*(glob(input.dir + f"/*.{suff}") \
+                              for suff in ['fa', 'fasta']))
+        bins = []
+        with open(output.bins, 'wt') as bins_out:
+            for fasta_file in fasta_files:
+                # get (and clean up) bin name
+                bin_id = os.path.basename(fasta_file)
+                bin_id = re.sub(r'\.f(ast)?a$', '', bin_id)
+                bin_id = re.sub(r'^(\d)', r'Bin_\1', bin_id)
+                bins.append(bin_id)
+
+                for contig in SeqIO.parse(fasta_file, 'fasta'):
+                    contig_num = int(re.search(r'(\d+)$', contig.id).group(1))
+                    for split_num in range(1, contig_splits.get(contig.id, 1)+1):
+                        if rename_prefix:
+                            split = \
+                                (f"{rename_prefix}_{contig_num:012d}" \
+                                 f"_split_{split_num:05d}")
+                        else:
+                            split = contig.id + f"_split_{split_num:05d}"
+                    bins_out.write(f"{split}\t{bin_id}\n")
+
+        
+
+###########
+# Checkm
+
+rule checkm:
+    input: "binning/merged.bins"
+    output: "binning/checkm/checkm.tsv",
+    threads: max_threads
+    shell: """
+        checkm lineage_wf ./binning/merged.bins -x fasta \
+            ./binning/checkm/checkm --tab_table -t \
+            {threads} -f {output} > {output}.log 2>&1
+        """
+
+rule checkm_o2:
+    input: rules.checkm.output
+    output: "binning/checkm/checkm.o2.tsv"
+    shell:
+        "checkm qa binning/checkm/checkm/lineage.ms \
+                   binning/checkm/checkm -o2 --tab_table \
+            -f {output} > {output}.log 2>&1"
