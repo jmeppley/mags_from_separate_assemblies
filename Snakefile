@@ -417,6 +417,8 @@ rule min_contig_length:
                 if len(contig) >= int(min_contig_length):
                     out_handle.write(contig.format('fasta'))
 
+# NOTE: finishm is REALLY slow. Run this on the HPC or maybe drep first?
+
 rule finishm:
     """
     Running 11 of these in parallel killed our system,
