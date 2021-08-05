@@ -14,6 +14,8 @@ max_threads = config.get('max_threads', 9)
 min_contig_length = int(config.get('min_contig_length', 1500))
 use_finishm = config.get('use_finishm', True)
 mag_dir = "MAGs_finished" if use_finishm else "MAGs"
+gtdbtk_dir = config.get('gtdbtk_dir', \
+                        '/mnt/delong/scratch/aleu/GTDB_r95/gtdbtk_r95/release95')
 
 # Set up input files
 #  This should be a dict of sample -> {"fastq": reads_fastq, "contigs": fasta_file}
@@ -42,7 +44,7 @@ localrules: output
 
 #output_files = expand("binning/{sample}/das_tool_DASTool_scaffolds2bin.txt", \
 #                      sample=samples)
-output_files = [f'{mag_dir}/dRep'] 
+output_files = [f'{mag_dir}/gtdbtk'] 
 logger.debug("OUTPUT FILES: " + repr(output_files))
 
 rule output:
@@ -116,7 +118,7 @@ rule metabat_sensitive:
     shell: """
         rm -rf {output.bins}
         metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
-                     --minContig {wildcards.min_contig} -v -B 20 --keep \
+                     --minContig {wildcards.min_contig} -v -B {threads} --keep \
                      --saveTNF {output.tnf} --saveDistance {output.dist} \
                      --sensitive \
                      -o {output.bins}/{wildcards.sample}.bin \
@@ -139,7 +141,7 @@ rule metabat_other:
     shell: """
         rm -rf {output.bins}
         metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
-                     --minContig {wildcards.min_contig} -v -B 20 --keep \
+                     --minContig {wildcards.min_contig} -v -B {threads} --keep \
                      --saveTNF {input.tnf} --saveDistance {input.dist} \
                      --{wildcards.mode} \
                      -o {output.bins}/{wildcards.sample}.bin \
@@ -501,4 +503,13 @@ rule dereplicate:
         dRep dereplicate {output} -g {input.fastas} -p {threads} \
           --genomeInfo {input.info} -comp 70 -con 10 -nc 0.6 -sa 0.97 \
           > {output}.log 2>&1
+        """
+
+rule gtdbtk:
+    input: rules.dereplicate.output
+    output: directory("{mag_dir}/gtdbtk")
+    conda: "conda.gtdbtk.yaml"
+    shell: """
+        export GTDBTK_DATA_PATH={gtdbtk_dir}
+        gtdbtk classify_wf --genome_dir {input}/dereplicated_genomes --out_dir {output} -x {mag_suffix} --cpus 20 > {output}.log 2>&1
         """
