@@ -1,8 +1,68 @@
 """
-Binning MAGs for John
-Hey John
-You probably already know what my whole process is but I guess this is just my
-notes and commentary on the small refining steps I like to do. 
+Binning MAGs from multiple single sample assemblies:
+
+This is a snakemake version of the MAG workflow Andy Leu developed for
+Poff et al 2021:
+https://doi.org/10.1073/pnas.2018269118
+
+== Running:
+
+Input:
+
+ * Fasta file of contigs from each sample assembly
+ * Fastq file of reads from each sample
+
+NOTE on Naming: Input files should have consistent names that can be described
+by a snakemake style wildcards_glob pattern. The default patterns are
+
+    "assembly/{sample}/contigs.fasta"
+    "assembly/{sample}/{seq_run}.clean.fastq"
+
+These are the default locations genrated by the assembly workflow in 
+https://github.com/jmeppley/workflows.
+
+There must be only one set of contigs for each sample. The may be multiple
+fastq files for each sample. This allows multiple sequencing runs to be pooled for each "sample".
+You can use a different naming scheme by supplying new templates in the config
+(see below).
+
+Config:
+
+Snakemake configuration can be passed nby command line args or as a YAML or
+JSON file. The parameters are:
+
+ * fasta_template: the wildcards_glob template for finding fasta files. It must
+                   contain only a single {sample} wildcard.
+
+ * fastq_template: the wildcards_glob for finding reads. It must contain two
+                   wildcards: {sample} and {seq_run}.
+
+ * max_threads (default 9): max threads for each individual step. 
+
+ * min_contig_length (default 1500): ignore shorter contigs than this
+
+ * use_finishm (default True): FinishM can be slow. Set this to False for
+                               quick and dirty MAGs
+
+ * gtdbtk_dir: location of unpacked GTDB database
+
+== Steps:
+
+
+Generate MAGs for each sample assembly a few different ways:
+
+ * map reads to contigs with  CoverM (and megahit2)
+ * generate MAGs with a few different methods: metabat, maxbin, concoct
+ * merge MAGs with DASTool
+ * extract reads mapped to each MAG and reassemble individual MAGs
+ * optinal: polish MAGs with FinishM
+
+Merge MAGs from all samples into one final set:
+
+ * checkM: score MAGs on completeness and 
+ * dRep: merge MAGs across all samples into one set of non-redundant MAGs
+ * GTDBtk: assign taxonomy to MAGs
+
 """
 
 # execution params
@@ -14,19 +74,26 @@ max_threads = config.get('max_threads', 9)
 min_contig_length = int(config.get('min_contig_length', 1500))
 use_finishm = config.get('use_finishm', True)
 mag_dir = "MAGs_finished" if use_finishm else "MAGs"
+mag_suffix = ".fa"
 gtdbtk_dir = config.get('gtdbtk_dir', \
                         '/mnt/delong/scratch/aleu/GTDB_r95/gtdbtk_r95/release95')
 
 # Set up input files
-#  This should be a dict of sample -> {"fastq": reads_fastq, "contigs": fasta_file}
-fasta_template = "assembly/{sample}/contigs.all.fasta"
-fastq_template = "assembly/{sample}/{assembly}.clean.fastq"
+fasta_template = config.get('fasta_template', \
+                            "assembly/{sample}/contigs.all.fasta")
+fastq_template = config.get('fastq_template', \
+                            "assembly/{sample}/{seq_run}.clean.fastq")
 samples, assemblies = glob_wildcards(fastq_template)
 logger.debug("Found {} samples".format(len(samples)))
 assembly_files = {s:{"contigs": fasta_template.format(sample=s),
-                     "fastq": fastq_template.format(sample=s, assembly=a),
+                     "fastq": fastq_template.format(sample=s, seq_run=a),
                      "bam": f"binning/{s}/coverm/contigs.all.fasta.{a}.clean.fastq.bam"}
-                  for s, a in zip(samples, assemblies)}
+                  for s, a in zip(samples, assemblies)
+                  if os.path.exists(fasta_template.format(sample=s))
+                 }
+# filter ed to only completed assemblies
+samples = assembly_files.keys()
+
 
 # binning tools
 method_params_list = \
@@ -40,16 +107,24 @@ logger.debug("METHODS: " + repr(method_params_list))
 ###########
 # Target
 #  the first rule defines the default output
-localrules: output
+localrules: all, sample_MAGs, up_to_checkpoints, through_checkpoints, \
+            min_contig_length, link_for_checkm, genome_info
 
 #output_files = expand("binning/{sample}/das_tool_DASTool_scaffolds2bin.txt", \
 #                      sample=samples)
 output_files = [f'{mag_dir}/gtdbtk'] 
 logger.debug("OUTPUT FILES: " + repr(output_files))
 
-rule output:
+# do everything
+rule all:
     input: output_files
 
+# just make MAGs for individual assemblies
+rule sample_MAGs:
+    input:
+        f"{mag_dir}/genome_info.csv"
+
+# targets to break up checkpoints
 rule up_to_checkpoints:
     input:
         expand("binning/{sample}/das_tool_DASTool_summary.txt",
