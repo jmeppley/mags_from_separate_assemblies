@@ -4,3 +4,7 @@
 /MAGs_finished/
 /reassembly/
 /assembly
+/snakemake.env/
+/conda.env/
+/env/
+*.sw[po]
