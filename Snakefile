@@ -67,6 +67,7 @@ Merge MAGs from all samples into one final set:
 
 # execution params
 max_threads = config.get('max_threads', 9)
+concoct_threads = config.get('concoct_threads', 19)
 
 ###########
 # Set Up Variables
@@ -110,7 +111,7 @@ logger.debug("METHODS: " + repr(method_params_list))
 localrules: all, sample_MAGs, up_to_checkpoints, through_checkpoints, \
             min_contig_length, link_for_checkm, genome_info
 
-#output_files = expand("binning/{sample}/das_tool_DASTool_scaffolds2bin.txt", \
+#output_files = expand("binning/{sample}/das_tool_DASTool_contig2bin.txt", \
 #                      sample=samples)
 output_files = [f'{mag_dir}/gtdbtk'] 
 logger.debug("OUTPUT FILES: " + repr(output_files))
@@ -127,7 +128,7 @@ rule sample_MAGs:
 # targets to break up checkpoints
 rule up_to_checkpoints:
     input:
-        expand("binning/{sample}/das_tool_DASTool_summary.txt",
+        expand("binning/{sample}/das_tool_DASTool_summary.tsv",
                sample=samples)
 
 rule through_checkpoints:
@@ -297,7 +298,7 @@ rule concoct:
         "binning/{sample}/concoct_files/concoct_output_clustering_gt1000.csv"
     params: 
         out_prefix="binning/{sample}/concoct_files/concoct_output"
-    threads: max_threads
+    threads: concoct_threads
     shell:
         "concoct -t {threads} --composition_file {input.fasta} \
                  --coverage_file {input.coverage} -b {params.out_prefix} \
@@ -342,14 +343,14 @@ rule das_tool:
                      method_params=method_params_list),
         contigs=lambda w: assembly_files[w.sample]['contigs'],
     output:
-        bins="binning/{sample}/das_tool_DASTool_scaffolds2bin.txt",
-        summary="binning/{sample}/das_tool_DASTool_summary.txt"
+        bins="binning/{sample}/das_tool_DASTool_contig2bin.tsv",
+        summary="binning/{sample}/das_tool_DASTool_summary.tsv"
     threads: max_threads
     params:
         n=len(method_params_list),
         out_pref="binning/{sample}/das_tool",
         files=lambda w: ",".join( \
-            (f"{w.sample}/binning/{method_params}.scaffolds2bin.tsv" \
+            (f"{w.sample}/binning/{method_params}.contig2bin.tsv" \
              for method_params in method_params_list)),
         labels=",".join(method_params_list),
     shell:
@@ -406,7 +407,7 @@ checkpoint das_tool_bins:
      das_tool is adding that.
      """
     input: 
-        "binning/{sample}/das_tool_DASTool_scaffolds2bin.txt",
+        "binning/{sample}/das_tool_DASTool_contig2bin.tsv",
     output: directory("binning/{sample}/merged_bins")
     shell:
         """
