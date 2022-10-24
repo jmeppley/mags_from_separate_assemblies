@@ -75,7 +75,7 @@ concoct_threads = config.get('concoct_threads', 19)
 min_contig_length = int(config.get('min_contig_length', 1500))
 use_finishm = config.get('use_finishm', True)
 mag_dir = "MAGs_finished" if use_finishm else "MAGs"
-mag_suffix = ".fa"
+mag_suffix = ".fasta"
 gtdbtk_dir = config.get('gtdbtk_dir', \
                         '/mnt/delong/scratch/aleu/GTDB_r95/gtdbtk_r95/release95')
 
@@ -86,20 +86,28 @@ fastq_template = config.get('fastq_template', \
                             "assembly/{sample}/{seq_run}.clean.fastq")
 samples, assemblies = glob_wildcards(fastq_template)
 logger.debug("Found {} samples".format(len(samples)))
+skip_samples = config.get('skip_samples', "")
+skip_samples = set(skip_samples.split(";"))
 assembly_files = {s:{"contigs": fasta_template.format(sample=s),
                      "fastq": fastq_template.format(sample=s, seq_run=a),
                      "bam": f"binning/{s}/coverm/contigs.all.fasta.{a}.clean.fastq.bam"}
                   for s, a in zip(samples, assemblies)
+                  if s not in skip_samples
                   if os.path.exists(fasta_template.format(sample=s))
                  }
 # filter ed to only completed assemblies
 samples = assembly_files.keys()
+logger.debug("Using {} samples".format(len(samples)))
 
+# help snakemake parse samples and bins
+sample_patt = r'(' + r"|".join(samples) + r')'
+wildcard_constraints:
+    sample=sample_patt
 
 # binning tools
 method_params_list = \
     [f'maxbin.{min_contig_length}.{markers}' for markers in ['40', '107']] + \
-    [f'metabat2.{min_contig_length}', 'concoct.default'] + \
+    [f'metabat2.{min_contig_length}'] + \
     [f'metabat.{min_contig_length}.{mode}' \
      for mode in ['specific', 'veryspecific', 'sensitive', \
                   'verysensitive', 'superspecific']] 
@@ -434,6 +442,7 @@ checkpoint das_tool_bins:
 def get_sample_bins(sample):
     checkpoint_dir = checkpoints.das_tool_bins.get(sample=sample).output
     bins, = glob_wildcards(f"binning/{sample}/merged_bins/{{bin_id}}.fasta")
+    logger.debug(f"Sample {sample} bins: " + str(bins))
     return bins
 
 rule extract_reads:
