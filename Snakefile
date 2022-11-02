@@ -522,6 +522,7 @@ rule finishm:
         finishm=1   
     params:
         out_dir="reassembly/{sample}/finished"
+    threads: 19
     shell: """
         mkdir -p {params.out_dir}
         finishm roundup --genomes {input.fasta} \
