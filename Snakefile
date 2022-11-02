@@ -71,6 +71,7 @@ concoct_threads = config.get('concoct_threads', 19)
 
 ###########
 # Set Up Variables
+mag_naming_prefix = config.get('mag_naming_prefix', 'MAG')
 
 min_contig_length = int(config.get('min_contig_length', 1500))
 use_finishm = config.get('use_finishm', True)
@@ -121,7 +122,8 @@ localrules: all, sample_MAGs, up_to_checkpoints, through_checkpoints, \
 
 #output_files = expand("binning/{sample}/das_tool_DASTool_contig2bin.txt", \
 #                      sample=samples)
-output_files = [f'{mag_dir}/gtdbtk'] 
+#output_files = [f'{mag_dir}/gtdbtk'] 
+output_files = ['final_MAGs.tsv']
 logger.debug("OUTPUT FILES: " + repr(output_files))
 
 # do everything
@@ -538,25 +540,42 @@ rule link_for_checkm:
     output: "{mag_dir}/{sample}_{bin_id}.fasta"
     shell: "ln -s ../{input} {output}"
 
-rule checkm:
-    input:
-        fastas=lambda w: \
-                   [f"{mag_dir}/{sample}_{bin_id}.fasta" \
+
+def get_checkm_inputs(wildcards):
+    """ There are two checkM runs:
+
+       * preparing for dereplication: do all of them
+       * after dereplication and renaming: just the good ones
+
+    Each one is after a different checkpoint.
+    """
+    # Case 1: all the MAGs collected in mmag_dir 
+    if wildcards.mag_dir == mag_dir:
+        return [f"{mag_dir}/{sample}_{bin_id}.fasta" \
                     for sample in samples \
                     for bin_id in get_sample_bins(sample) \
-                   ],
+               ]
+
+    # Case 2: the remnamed mags
+    if wildcards.mag_dir == "final_MAGs":
+        return get_renamed_mags()
+
+    raise Exception("Unknown MAG dir: " + wildcards.mag_dir)
+
+rule checkm:
+    input: get_checkm_inputs
     output: "{mag_dir}/checkm.tsv",
     threads: max_threads
     shell: """
-        checkm lineage_wf ./{mag_dir} -x fasta ./{mag_dir}/checkm --tab_table -t \
+        checkm lineage_wf ./{wildcards.mag_dir} -x fasta ./{wildcards.mag_dir}/checkm --tab_table -t \
             {threads} -f {output} > {output}.log 2>&1
         """
 
 rule checkm_o2:
-    input: rules.checkm.output
+    input: "{mag_dir}/checkm.tsv",
     output: "{mag_dir}/checkm.o2.tsv"
     shell:
-        "checkm qa {mag_dir}/checkm/lineage.ms {mag_dir}/checkm -o2 --tab_table \
+        "checkm qa {wildcards.mag_dir}/checkm/lineage.ms {wildcards.mag_dir}/checkm -o2 --tab_table \
             -f {output} > {output}.log 2>&1"
 
 rule genome_info:
@@ -564,7 +583,7 @@ rule genome_info:
     input:
         checkm=rules.checkm.output,
         o2=rules.checkm_o2.output
-    output: "{mag_dir}/genome_info.csv"
+    output: "{wildcards.mag_dir}/genome_info.csv"
     shell:
         """
         gawk -F"\t" '{{print $1".fasta,"$12","$13}}' {input.checkm} \
@@ -598,3 +617,85 @@ rule gtdbtk:
         export GTDBTK_DATA_PATH={gtdbtk_dir}
         gtdbtk classify_wf --genome_dir {input}/dereplicated_genomes --out_dir {output} -x {mag_suffix} --cpus 20 > {output}.log 2>&1
         """
+
+checkpoint rename_final_mags:
+    input:
+        gtdbtk=f'{mag_dir}/gtdbtk',
+    output:
+        mags=directory('final_MAGs'),
+        name_dict='final_MAGs/names.tsv'
+    run:
+        import pandas
+        import re
+        from collections import Counter
+        from Bio import SeqIO
+        # there are two possible outputfiles to check (archeal and bacterial)
+        tax_df = None
+        gtsv = str(input.gtdbtk) + "/gtdbtk.ar53.summary.tsv"
+        if os.path.exists(gtsv):
+            tax_df = pandas.read_csv(gtsv, header=0, index_col=0, sep='\t')
+        gtsv = str(input.gtdbtk) + "/gtdbtk.bac120.summary.tsv"
+        if os.path.exists(gtsv):
+            tax_df_2 = pandas.read_csv(gtsv, header=0, index_col=0, sep='\t')
+            if tax_df is None:
+                tax_df = tax_df_2
+            else:
+                tax_df = tax_df.append(tax_df_2)
+
+        # Name each one based on classification
+        bins_to_tax = {}
+        tax_counts = Counter()
+        for bin_id, classification in tax_df['classification'].items():
+            # get last non-species name that looks like a name and not a code:
+            #  (only letters numbers - and _, with at least one lowercase letter)
+            taxon = [name for name
+                     in re.findall(r'[dpcofg]__([-_A-Za-z0-9]+);', str(classification))
+                     if re.search(r'[a-z]', name) is not None
+                    ][-1]
+
+            # clean up non-word characters (should only be dashes)
+            taxon = re.sub(r'\W', '_', taxon)
+            tax_counts[taxon] += 1
+            name = f'{mag_naming_prefix}_{taxon}-{tax_counts[taxon]}'
+            bins_to_tax[bin_id] = name
+
+        # rename each mag
+        os.makedirs(str(output.mags), exist_ok=True)
+        with open(str(output.name_dict), 'wt') as NAMES_OUT:
+            for bin_id, name in bins_to_tax.items():
+                NAMES_OUT.write(f"{name}\t{bin_id}\n")
+                with open(f'{output.mags}/{name}.fasta', 'wt') as FASTA_OUT:
+                    count = 0
+                    for contig in SeqIO.parse(f'{mag_dir}/dRep/dereplicated_genomes/{bin_id}.fasta', 'fasta'):
+                        count += 1
+                        contig.id = f"{name}_{count}"
+                        FASTA_OUT.write(contig.format('fasta'))
+
+
+def get_renamed_mags():
+    " post-checkpoint function to get the list of final MAGs "
+
+    final_mag_dir = checkpoints.rename_final_mags.get().output.mags
+    return [f"{final_mag_dir}/{fn}" 
+            for fn in os.listdir(final_mag_dir)
+            if fn.endswith(".fasta")
+           ]
+
+
+rule final_mag_table:
+    input:
+        checkm_o2=f'final_MAGs/checkm.o2.tsv'
+    output:
+        stats='final_MAGs.tsv'
+    run:
+        import pandas
+        # Compile a final table of stats
+        stats_df = pandas.read_csv(str(input.checkm_o2), sep='\t', index_col=0, header=0)
+
+        # pick the most intersting columns and add the atxonomic classification
+        final_df = stats_df[['Completeness', 'Contamination', 'Strain heterogeneity',
+                             'Genome size (bp)', '# contigs', 'N50 (contigs)', 'Mean contig length (bp)',
+                             'Longest contig (bp)', 'GC', '# predicted genes'
+                           ]]
+
+        final_df.to_csv(str(output.stats), sep='\t')
