@@ -524,7 +524,7 @@ rule finishm:
         finishm=1   
     params:
         out_dir="reassembly/{sample}/finished"
-    threads: 19
+    threads: 1
     shell: """
         mkdir -p {params.out_dir}
         finishm roundup --genomes {input.fasta} \
@@ -584,7 +584,7 @@ rule genome_info:
     input:
         checkm=rules.checkm.output,
         o2=rules.checkm_o2.output
-    output: "{wildcards.mag_dir}/genome_info.csv"
+    output: "{mag_dir}/genome_info.csv"
     shell:
         """
         gawk -F"\t" '{{print $1".fasta,"$12","$13}}' {input.checkm} \
