@@ -85,7 +85,7 @@ fasta_template = config.get('fasta_template', \
                             "assembly/{sample}/contigs.all.fasta")
 fastq_template = config.get('fastq_template', \
                             "assembly/{sample}/{seq_run}.clean.fastq")
-samples, assemblies = glob_wildcards(fastq_template)
+samples, assemblies = glob_wildcards(fastq_template, followlinks=True)
 logger.debug("Found {} samples".format(len(samples)))
 skip_samples = config.get('skip_samples', "")
 skip_samples = set(skip_samples.split(";"))
