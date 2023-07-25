@@ -1,0 +1,11 @@
+The finishm step of this workflow is fragile.
+
+I have created my own conda package to install finishmto try to solve this with limited success. On some systems, I have had to go in and manually recompile the velvet binaries installed by ruby into the conda env.
+
+    $ cd ${CONDA_ENV}/lib/ruby/gems/2.5.0/gems/finishm-0.0.9/ext/src
+    $ make -j2 velvetg velveth
+    
+If this doesn't work or finishim is too slow, you can skip it in the workflow by setting the use_finishm config value to False:
+
+    $ snakemake --config use_finishm=False ...
+    
