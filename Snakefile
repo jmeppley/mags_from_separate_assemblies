@@ -89,9 +89,14 @@ samples, assemblies = glob_wildcards(fastq_template, followlinks=True)
 logger.debug("Found {} samples".format(len(samples)))
 skip_samples = config.get('skip_samples', "")
 skip_samples = set(skip_samples.split(";"))
+def get_bam_file(sample, assembly):
+    """ coverm output is the input file names concatenated """
+    contigs_fn = os.path.basename(fasta_template.format(sample=sample))
+    reads_fn = os.path.basename(fastq_template.format(sample=sample, seq_run=assembly))
+    return f"binning/{sample}/coverm/{contigs_fn}.{reads_fn}.bam"
 assembly_files = {s:{"contigs": fasta_template.format(sample=s),
                      "fastq": fastq_template.format(sample=s, seq_run=a),
-                     "bam": f"binning/{s}/coverm/contigs.all.fasta.{a}.clean.fastq.bam"}
+                     "bam": get_bam_file(s, a)}
                   for s, a in zip(samples, assemblies)
                   if s not in skip_samples
                   if os.path.exists(fasta_template.format(sample=s))
@@ -138,7 +143,7 @@ rule sample_MAGs:
 # targets to break up checkpoints
 rule up_to_checkpoints:
     input:
-        expand("binning/{sample}/das_tool_DASTool_summary.tsv",
+        expand("binning/{sample}/das_tool.log",
                sample=samples)
 
 rule through_checkpoints:
@@ -165,7 +170,7 @@ rule coverm_make:
     params:
         dir="binning/{sample}/coverm"
     shell: 
-       "coverm make --interleaved {input.fastq} --reference {input.contigs} \
+        "coverm make --interleaved {input.fastq} --reference {input.contigs} \
                     --threads {threads} --output-directory {params.dir} \
             > {output.bam}.log 2>&1"
 
@@ -348,13 +353,22 @@ rule make_bin_table:
                > {output}"""
 
 rule das_tool:
+    """
+    Note: somteimes the output files are
+     - *_DASTool_summary.tsv
+     - *_DASTool_contig2bin.tsv
+    and sometimes it's:
+     - *_DASTool_summary.txt
+     - *_DASTool_scaffolds2bin.txt
+    I'm not sure what the reason is, so let's jut be flexible. We'll create a logfile here
+    and then standardize the outputs in the checkpoint below.
+    """
     input:
         files=expand("binning/{{sample}}/{method_params}.scaffolds2bin.tsv",
                      method_params=method_params_list),
         contigs=lambda w: assembly_files[w.sample]['contigs'],
     output:
-        bins="binning/{sample}/das_tool_DASTool_contig2bin.tsv",
-        summary="binning/{sample}/das_tool_DASTool_summary.tsv"
+        log="binning/{sample}/das_tool.log"
     threads: max_threads
     params:
         n=len(method_params_list),
@@ -373,8 +387,8 @@ rule das_tool:
         N=0
         INPUT_FILES=({input.files})
         LABELS=({method_params_list})
-        INPUT_FILES_FILE={output.bins}.infiles
-        LABEL_FILE={output.bins}.labels
+        INPUT_FILES_FILE={params.out_pref}.infiles
+        LABEL_FILE={params.out_pref}.labels
 
         while [ "$N" -lt "$L" ]; do
             if [ -s ${{INPUT_FILES[$N]}} ]; then
@@ -395,7 +409,7 @@ rule das_tool:
         # now run das_tool
         DAS_Tool -i ${{INPUT_FILES}} -l ${{LABELS}} -c {input.contigs} \
                   -o {params.out_pref} -t {threads} --search_engine diamond \
-            > {output.summary}.log 2>&1
+            > {output.log} 2>&1
         """
 
 """
@@ -415,15 +429,48 @@ checkpoint das_tool_bins:
      
      Also, remove _sub from some fasta file names. I'm not sure why
      das_tool is adding that.
+     
+     Also, also, stnadardize the output file names that seem to change
      """
     input: 
-        "binning/{sample}/das_tool_DASTool_contig2bin.tsv",
-    output: directory("binning/{sample}/merged_bins")
+        "binning/{sample}/das_tool.log",
+    output: 
+        bins=directory("binning/{sample}/merged_bins"),
+        bin_tsv="binning/{sample}/das_tool.bins.tsv",
+        summary="binning/{sample}/das_tool.summary.tsv"
+    log:
+        "binning/{sample}/das_tool.bins.log",
+    params:
+        root="binning/{sample}/das_tool_DASTool"
     shell:
         """
-        rm -rf {output}
-        mkdir -p {output}
-        cut -f 2 {input} | uniq | while read FASTA; do
+        echo Finding bins TSV > {log}
+        # locate bins tsv
+        if [ -e {params.root}_contig2bin.tsv ]; then
+            cp {params.root}_contig2bin.tsv {output.bin_tsv}
+        else
+            if [ -e {params.root}_scaffolds2bin.txt ]; then
+                cp {params.root}_scaffolds2bin.txt {output.bin_tsv}
+            fi
+        fi
+
+        echo Finding Summary file >> {log}
+        # locate summary file
+        if [ -e {params.root}_summary.tsv ]; then
+            cp {params.root}_summary.tsv {output.summary}
+        else
+            if [ -e {params.root}_summary.txt ]; then
+                cp {params.root}_summary.txt {output.summary}
+            fi
+        fi
+
+        echo Cleaning up >> {log}
+        rm -rf {output.bins}
+        mkdir -p {output.bins}
+        
+        echo starting loop >> {log}
+        cut -f 2 {output.bin_tsv} | uniq | while read FASTA; do
+          echo fasta is $FASTA >> {log}
 
           # remove _sub suffix if present
           FASTA=${{FASTA%%_sub}}
@@ -434,9 +481,9 @@ checkpoint das_tool_bins:
 
           METHOD=$(basename $(dirname $FASTA))
           METHOD=${{METHOD%%.bins}}
-          OUTF={output}/$METHOD.$(basename $FASTA_OUT)
-          OUTL={output}/$METHOD.$(basename $FASTA_OUT).list
-          grep "$FASTA" {input} | cut -f 1 > $OUTL
+          OUTF={output.bins}/$METHOD.$(basename $FASTA_OUT)
+          OUTL={output.bins}/$METHOD.$(basename $FASTA_OUT).list
+          grep "$FASTA" {output.bin_tsv} | cut -f 1 > $OUTL
           seqtk subseq $FASTA $OUTL > $OUTF 2> $OUTF.log
         done
         """
@@ -458,7 +505,7 @@ rule extract_reads:
     output: "reassembly/{sample}/{bin_id}.reads.fastq"
     params:
         bam_files=lambda w: assembly_files[w.sample]['bam']
-    threads: 2
+    threads: 3
     shell: """
         rm -f {output} {output}.list {output}.bed
 
@@ -471,7 +518,7 @@ rule extract_reads:
         for BAM_FILE in {params.bam_files}; do
             seqtk subseq \
                 <(samtools fastq -n $BAM_FILE) \
-                <(samtools view -L {output}.bed $BAM_FILE | cut -f 1) \
+                <(samtools view -L {output}.bed $BAM_FILE | cut -f 1 | sort -u) \
                 >> {output}
         done
         """
@@ -563,32 +610,26 @@ def get_checkm_inputs(wildcards):
 
     raise Exception("Unknown MAG dir: " + wildcards.mag_dir)
 
-rule checkm:
+rule checkm2:
     input: get_checkm_inputs
-    output: "{mag_dir}/checkm.tsv",
+    output: "{mag_dir}/checkm2/quality_report.tsv",
     threads: max_threads
     shell: """
-        checkm lineage_wf ./{wildcards.mag_dir} -x fasta ./{wildcards.mag_dir}/checkm --tab_table -t \
-            {threads} -f {output} > {output}.log 2>&1
+        checkm2 predict -i ./{wildcards.mag_dir} \
+                    -o ./{wildcards.mag_dir}/checkm2 \
+                    -t {threads} -x fasta --force \
+           > {output}.log 2>&1
         """
 
-rule checkm_o2:
-    input: "{mag_dir}/checkm.tsv",
-    output: "{mag_dir}/checkm.o2.tsv"
-    shell:
-        "checkm qa {wildcards.mag_dir}/checkm/lineage.ms {wildcards.mag_dir}/checkm -o2 --tab_table \
-            -f {output} > {output}.log 2>&1"
-
 rule genome_info:
-    """ reformat the CheckM output, also force second checkm to run """
+    """ reformat the CheckM output """
     input:
-        checkm=rules.checkm.output,
-        o2=rules.checkm_o2.output
+        checkm=rules.checkm2.output,
     output: "{mag_dir}/genome_info.csv"
     shell:
         """
-        gawk -F"\t" '{{print $1".fasta,"$12","$13}}' {input.checkm} \
-         | sed 's/Bin Id.fasta,Completeness,Contamination/genome,completeness,contamination/g' \
+        gawk -F"\t" '{{print $1".fasta,"$2","$3}}' {input.checkm} \
+         | sed 's/Name.fasta,Completeness,Contamination/genome,completeness,contamination/g' \
          > {output} 2> {output}.log
         """
 
@@ -685,18 +726,29 @@ def get_renamed_mags():
 
 rule final_mag_table:
     input:
-        checkm_o2=f'final_MAGs/checkm.o2.tsv'
+        checkm=f'final_MAGs/checkm2/quality_report.tsv',
+        name_dict='final_MAGs/names.tsv'
     output:
         stats='final_MAGs.tsv'
     run:
         import pandas
         # Compile a final table of stats
-        stats_df = pandas.read_csv(str(input.checkm_o2), sep='\t', index_col=0, header=0)
+        stats_df = pandas.read_csv(str(input.checkm), sep='\t', index_col=0, header=0)
 
         # pick the most intersting columns and add the atxonomic classification
-        final_df = stats_df[['Completeness', 'Contamination', 'Strain heterogeneity',
-                             'Genome size (bp)', '# contigs', 'N50 (contigs)', 'Mean contig length (bp)',
-                             'Longest contig (bp)', 'GC', '# predicted genes'
-                           ]]
+        columns = [
+            "Completeness", "Contamination",
+            "Coding_Density", "Contig_N50", 
+            "Average_Gene_Length", "Genome_Size", "GC_Content",
+            "Total_Coding_Sequences"
+        ]
+        
+        # load lineage from gtdbtk output
+        names_df = pandas.read_csv(str(input.name_dict), sep='\t',
+                                   index_col=0, header=None,
+                                   names=['name', 'old_id', 'lineage']
+                                  )
 
+        # merge into one table
+        final_df = stats_df[columns].join(names_df['lineage'])
         final_df.to_csv(str(output.stats), sep='\t')

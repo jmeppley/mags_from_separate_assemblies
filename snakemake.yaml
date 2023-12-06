@@ -11,6 +11,6 @@ dependencies:
     - concoct
     - megahit
     - das_tool
-    - checkm-genome
+    - checkm2
     - coverm
     - seqtk
