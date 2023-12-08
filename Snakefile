@@ -79,6 +79,8 @@ mag_dir = "MAGs_finished" if use_finishm else "MAGs"
 mag_suffix = ".fasta"
 gtdbtk_dir = config.get('gtdbtk_dir', \
                         '/mnt/delong/scratch/aleu/GTDB_r95/gtdbtk_r95/release95')
+gtdbtk_mash_dir = config.get('gtdbtk_mash_dir', \
+                        f'{gtdbtk_dir}/.mashdb')
 
 # Set up input files
 fasta_template = config.get('fasta_template', \
@@ -563,6 +565,11 @@ def get_checkm_inputs(wildcards):
 
     raise Exception("Unknown MAG dir: " + wildcards.mag_dir)
 
+## TODO: checkm 1.2.2 isn't finding the data dir
+# the previous version was automatically finding $CONDA_ENV/checkm
+# v1.2.2 is looking in ~/.checkm and finding nothing. MEanwhile, CONDA_ENV/checkm does exist...
+# For now, I pegged the version at 1.2.1, but I should udpate the snakefile to use newer versions at some point
+    
 rule checkm:
     input: get_checkm_inputs
     output: "{mag_dir}/checkm.tsv",
@@ -614,9 +621,13 @@ rule gtdbtk:
     input: rules.dereplicate.output
     output: directory("{mag_dir}/gtdbtk")
     conda: "conda.gtdbtk.yaml"
+    threads: max_threads
     shell: """
         export GTDBTK_DATA_PATH={gtdbtk_dir}
-        gtdbtk classify_wf --genome_dir {input}/dereplicated_genomes --out_dir {output} -x {mag_suffix} --cpus 20 > {output}.log 2>&1
+        gtdbtk classify_wf --genome_dir {input}/dereplicated_genomes \
+            --mash_db {gtdbtk_mash_dir} \
+            --out_dir {output} -x {mag_suffix} --cpus {threads} \
+        > {output}.log 2>&1
         """
 
 checkpoint rename_final_mags:
@@ -641,10 +652,11 @@ checkpoint rename_final_mags:
             if tax_df is None:
                 tax_df = tax_df_2
             else:
-                tax_df = tax_df.append(tax_df_2)
+                tax_df = pandas.concat([tax_df, tax_df_2])
 
         # Name each one based on classification
         bins_to_tax = {}
+        bins_to_lineage = {}
         tax_counts = Counter()
         for bin_id, classification in tax_df['classification'].items():
             # get last non-species name that looks like a name and not a code:
@@ -659,12 +671,13 @@ checkpoint rename_final_mags:
             tax_counts[taxon] += 1
             name = f'{mag_naming_prefix}_{taxon}-{tax_counts[taxon]}'
             bins_to_tax[bin_id] = name
+            bins_to_lineage[bin_id] = classification
 
         # rename each mag
         os.makedirs(str(output.mags), exist_ok=True)
         with open(str(output.name_dict), 'wt') as NAMES_OUT:
             for bin_id, name in bins_to_tax.items():
-                NAMES_OUT.write(f"{name}\t{bin_id}\n")
+                NAMES_OUT.write(f"{name}\t{bin_id}\t{bins_to_lineage[bin_id]}\n")
                 with open(f'{output.mags}/{name}.fasta', 'wt') as FASTA_OUT:
                     count = 0
                     for contig in SeqIO.parse(f'{mag_dir}/dRep/dereplicated_genomes/{bin_id}.fasta', 'fasta'):
@@ -685,7 +698,8 @@ def get_renamed_mags():
 
 rule final_mag_table:
     input:
-        checkm_o2=f'final_MAGs/checkm.o2.tsv'
+        checkm_o2=f'final_MAGs/checkm.o2.tsv',
+        names='final_MAGs/names.tsv',
     output:
         stats='final_MAGs.tsv'
     run:
@@ -693,10 +707,19 @@ rule final_mag_table:
         # Compile a final table of stats
         stats_df = pandas.read_csv(str(input.checkm_o2), sep='\t', index_col=0, header=0)
 
+        # get classifications
+        names_df = pandas.read_csv(str(input.names), 
+                                   sep='\t', header=None, 
+                                   names=['tax_name', 'method_name', 'classification'],
+                                   index_col='tax_name')
+        
         # pick the most intersting columns and add the atxonomic classification
         final_df = stats_df[['Completeness', 'Contamination', 'Strain heterogeneity',
                              'Genome size (bp)', '# contigs', 'N50 (contigs)', 'Mean contig length (bp)',
                              'Longest contig (bp)', 'GC', '# predicted genes'
-                           ]]
+                           ]] \
+            .join(names_df['classification'])
+        
+        
 
         final_df.to_csv(str(output.stats), sep='\t')
