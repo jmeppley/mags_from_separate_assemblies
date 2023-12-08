@@ -68,6 +68,7 @@ Merge MAGs from all samples into one final set:
 # execution params
 max_threads = config.get('max_threads', 9)
 concoct_threads = config.get('concoct_threads', 19)
+CHECKM2_DB_PATH=config.get('checkm2_db_path', None)
 
 ###########
 # Set Up Variables
@@ -611,11 +612,21 @@ def get_checkm_inputs(wildcards):
     raise Exception("Unknown MAG dir: " + wildcards.mag_dir)
 
 rule checkm2:
+    """
+    When you install checkm2, you can set the db path for all future runs.
+    However, the user may shoose to override that by providing a path in
+    the snamekake config (checkm2_db_path=)
+    """
     input: get_checkm_inputs
     output: "{mag_dir}/checkm2/quality_report.tsv",
     threads: max_threads
+    params:
+        db_path=(f"--database_path={CHECKM2_DB_PATH}" \
+            if CHECKM2_DB_PATH is not None \
+            else "")
     shell: """
         checkm2 predict -i ./{wildcards.mag_dir} \
+                    {params.db_path} \
                     -o ./{wildcards.mag_dir}/checkm2 \
                     -t {threads} -x fasta --force \
            > {output}.log 2>&1
