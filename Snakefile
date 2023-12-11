@@ -79,7 +79,9 @@ use_finishm = config.get('use_finishm', True)
 mag_dir = "MAGs_finished" if use_finishm else "MAGs"
 mag_suffix = ".fasta"
 gtdbtk_dir = config.get('gtdbtk_dir', \
-                        '/mnt/delong/scratch/aleu/GTDB_r95/gtdbtk_r95/release95')
+                        '/mnt/delong/seqdbs/GTDB/214.1/release214')
+gtdbtk_mash_dir = config.get('gtdbtk_mash_dir', \
+                        f'{gtdbtk_dir}/.mashdb')
 
 # Set up input files
 fasta_template = config.get('fasta_template', \
@@ -207,6 +209,7 @@ rule metabat_sensitive:
         tnf="binning/{sample}/metabat.{min_contig}.tnf",
         dist="binning/{sample}/metabat.{min_contig}.dist",
     threads: max_threads
+    conda: "conda.binning.yaml"
     shell: """
         rm -rf {output.bins}
         metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
@@ -230,6 +233,7 @@ rule metabat_other:
     wildcard_constraints:
         mode="(specific|veryspecific|superspecific|verysensitive)"
     threads: max_threads
+    conda: "conda.binning.yaml"
     shell: """
         rm -rf {output.bins}
         metabat1 -t {threads} -i {input.contigs} -a {input.counts} \
@@ -248,6 +252,7 @@ rule metabat2:
         bins=directory("binning/{sample}" \
                        "/metabat2.{min_contig}.bins"),
     threads: max_threads
+    conda: "conda.binning.yaml"
     shell: """
         rm -rf {output.bins}
         metabat2 -t {threads} -i {input.contigs} -a {input.counts} \
@@ -267,6 +272,7 @@ rule maxbin:
         marker_set=lambda w: "" if w.markers == '107' \
                              else f"-markerset {w.markers}"
     threads: max_threads
+    conda: "conda.binning.yaml"
     shell: """
         rm -rf {output.bins}
         mkdir -p {output.bins}
@@ -302,6 +308,7 @@ rule concoct_coverage_table:
     output: "binning/{sample}/concoct_files/coverage_table.tsv"
     params:
         bam_files=lambda w: assembly_files[w.sample]['bam']
+    conda: "conda.binning.yaml"
     shell:
         "concoct_coverage_table.py {input.bed} {params.bam_files} \
           > {output} 2> {output}.log"
@@ -668,9 +675,12 @@ rule gtdbtk:
     conda: "conda.gtdbtk.yaml"
     shell: """
         export GTDBTK_DATA_PATH={gtdbtk_dir}
-        gtdbtk classify_wf --genome_dir {input}/dereplicated_genomes --out_dir {output} -x {mag_suffix} --cpus 20 > {output}.log 2>&1
-        """
+        gtdbtk classify_wf --genome_dir {input}/dereplicated_genomes \
+            --mash_db {gtdbtk_mash_dir} \
+            --out_dir {output} -x {mag_suffix} --cpus {threads} \
+        > {output}.log 2>&1
 
+        """
 checkpoint rename_final_mags:
     input:
         gtdbtk=f'{mag_dir}/gtdbtk',
@@ -693,10 +703,11 @@ checkpoint rename_final_mags:
             if tax_df is None:
                 tax_df = tax_df_2
             else:
-                tax_df = tax_df.append(tax_df_2)
+                tax_df = pandas.concat([tax_df, tax_df_2])
 
         # Name each one based on classification
         bins_to_tax = {}
+        bins_to_lineage = {}
         tax_counts = Counter()
         for bin_id, classification in tax_df['classification'].items():
             # get last non-species name that looks like a name and not a code:
@@ -711,12 +722,13 @@ checkpoint rename_final_mags:
             tax_counts[taxon] += 1
             name = f'{mag_naming_prefix}_{taxon}-{tax_counts[taxon]}'
             bins_to_tax[bin_id] = name
+            bins_to_lineage[bin_id] = classification
 
         # rename each mag
         os.makedirs(str(output.mags), exist_ok=True)
         with open(str(output.name_dict), 'wt') as NAMES_OUT:
             for bin_id, name in bins_to_tax.items():
-                NAMES_OUT.write(f"{name}\t{bin_id}\n")
+                NAMES_OUT.write(f"{name}\t{bin_id}\t{bins_to_lineage[bin_id]}\n")
                 with open(f'{output.mags}/{name}.fasta', 'wt') as FASTA_OUT:
                     count = 0
                     for contig in SeqIO.parse(f'{mag_dir}/dRep/dereplicated_genomes/{bin_id}.fasta', 'fasta'):
