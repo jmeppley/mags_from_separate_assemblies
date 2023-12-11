@@ -1,10 +1,12 @@
 /.snakemake/
+.ipynb_checkpoints/
 /binning/
 /MAGs/
 /MAGs_finished/
 /reassembly/
 /assembly
-/snakemake.env/
-/conda.env/
 /env/
+/*.env/
 *.sw[po]
+snake*dag
+snake*png
